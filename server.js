@@ -40,7 +40,15 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 
+// Keep every connection "hot" even when the game sends nothing for a
+// while (e.g. during the plane-drop/parachute intro before a duel's
+// real traffic starts). Without this, Render's proxy treats a quiet
+// socket as idle and closes it, which looked like "Lost connection
+// to the server." A ping every 25s is well under any idle timeout.
 wss.on('connection', (ws) => {
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   ws.roomCode = null;
   ws.role = null;
 
@@ -67,6 +75,7 @@ wss.on('connection', (ws) => {
       send(ws, { type: 'ready', youAre: 'guest', code });
 
     } else if (data.type === 'state' || data.type === 'shot') {
+      // just relay to whoever else is in the room
       const room = rooms.get(ws.roomCode);
       if (!room) return;
       const peer = ws.role === 'host' ? room.guest : room.host;
@@ -82,5 +91,16 @@ wss.on('connection', (ws) => {
     rooms.delete(ws.roomCode);
   });
 });
+
+// Ping all clients on a steady beat. If a client never answers two
+// pings in a row (isAlive stays false), it's a dead/zombie connection
+// and we terminate it so its room can be cleaned up.
+setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) { ws.terminate(); continue; }
+    ws.isAlive = false;
+    ws.ping();
+  }
+}, 25000);
 
 server.listen(PORT, () => console.log('Defence duel relay listening on port ' + PORT));
