@@ -74,8 +74,11 @@ wss.on('connection', (ws) => {
       send(room.host, { type: 'ready', youAre: 'host', code });
       send(ws, { type: 'ready', youAre: 'guest', code });
 
-    } else if (data.type === 'state' || data.type === 'shot') {
-      // just relay to whoever else is in the room
+    } else {
+      // everything else (state, shot, mapVote, mapChosen, roundSpawns, ...)
+      // is just relayed as-is to whoever else is in the room. The server
+      // has no idea what these mean; it's purely a mailbox between the
+      // two players so new message types never need a server change.
       const room = rooms.get(ws.roomCode);
       if (!room) return;
       const peer = ws.role === 'host' ? room.guest : room.host;
