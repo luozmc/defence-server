@@ -74,6 +74,25 @@ wss.on('connection', (ws) => {
       send(room.host, { type: 'ready', youAre: 'host', code });
       send(ws, { type: 'ready', youAre: 'guest', code });
 
+    } else if (data.type === 'chat') {
+      // menu/lobby chat is public: anyone connected who isn't currently paired
+      // into a duel room sees it. The instant two players are matched into a
+      // duel room, their chat becomes private - relayed only to each other.
+      const text = String(data.text || '').slice(0, 140).trim();
+      if (!text) return;
+      const name = String(data.name || 'Player').slice(0, 24);
+      if (ws.roomCode) {
+        const room = rooms.get(ws.roomCode);
+        if (!room) return;
+        const peer = ws.role === 'host' ? room.guest : room.host;
+        send(peer, { type: 'chat', name, text });
+      } else {
+        for (const other of wss.clients) {
+          if (other === ws || other.roomCode) continue;   // skip self and anyone currently in a duel
+          send(other, { type: 'chat', name, text });
+        }
+      }
+
     } else {
       // everything else (state, shot, mapVote, mapChosen, roundSpawns, ...)
       // is just relayed as-is to whoever else is in the room. The server
