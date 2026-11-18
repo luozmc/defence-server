@@ -32,6 +32,32 @@ const { WebSocketServer } = require('ws');
 const PORT = process.env.PORT || 3000;
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const rooms = new Map(); // room code -> { host: ws, guest: ws|null }
+const invites = new Map(); // inviteId -> { from: ws, to: ws, timeout }
+const INVITE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjklmnpqrstuvwxyz23456789';
+
+function newInviteId() {
+  let s = '';
+  for (let i = 0; i < 16; i++) s += INVITE_CHARS[Math.floor(Math.random() * INVITE_CHARS.length)];
+  return s;
+}
+function clearInvitesFor(ws) {
+  // called when a player disconnects or gets matched elsewhere, so a stale
+  // invite can never be accepted/declined against a socket that's gone
+  for (const [id, inv] of invites) {
+    if (inv.from !== ws && inv.to !== ws) continue;
+    clearTimeout(inv.timeout);
+    invites.delete(id);
+    const other = inv.from === ws ? inv.to : inv.from;
+    if (inv.from === ws) send(other, { type: 'duelInviteCancelled', inviteId: id }); // inviter vanished - tell the invitee to drop the popup
+    else send(other, { type: 'duelInviteDeclined', name: ws.playerName || 'Player' }); // invitee vanished - tell the inviter
+  }
+}
+function broadcastOnline() {
+  const names = [];
+  for (const c of wss.clients) if (c.playerName) names.push(c.playerName);
+  const payload = JSON.stringify({ type: 'online', count: names.length, players: names });
+  for (const c of wss.clients) if (c.readyState === c.OPEN) c.send(payload);
+}
 
 function randomCode() {
   let s = '';
@@ -180,12 +206,66 @@ wss.on('connection', (ws) => {
 
   ws.roomCode = null;
   ws.role = null;
+  ws.playerName = null;
 
   ws.on('message', (raw) => {
     let data;
     try { data = JSON.parse(raw); } catch (e) { return; }
 
-    if (data.type === 'create') {
+    if (data.type === 'identify') {
+      // lets this connection show up in the "who's online" list and be
+      // found by name for duel invites. Re-sendable any time the name
+      // might have changed (e.g. right after signing in).
+      ws.playerName = String(data.name || 'Guest').slice(0, 24) || 'Guest';
+      broadcastOnline();
+
+    } else if (data.type === 'listPlayers') {
+      const names = [];
+      for (const c of wss.clients) if (c.playerName) names.push(c.playerName);
+      send(ws, { type: 'online', count: names.length, players: names });
+
+    } else if (data.type === 'duelInvite') {
+      const toName = String(data.toName || '').slice(0, 24);
+      let target = null;
+      for (const c of wss.clients) {
+        if (c !== ws && c.playerName && c.playerName.toLowerCase() === toName.toLowerCase()) { target = c; break; }
+      }
+      if (!target) { send(ws, { type: 'duelInviteFailed', reason: toName + ' is not online right now.' }); return; }
+      if (ws.roomCode) { send(ws, { type: 'duelInviteFailed', reason: 'You are already in a match.' }); return; }
+      if (target.roomCode) { send(ws, { type: 'duelInviteFailed', reason: toName + ' is already in a match.' }); return; }
+      const id = newInviteId();
+      const timeout = setTimeout(() => {
+        if (!invites.has(id)) return;
+        invites.delete(id);
+        send(ws, { type: 'duelInviteFailed', reason: toName + ' did not respond in time.' });
+        send(target, { type: 'duelInviteCancelled', inviteId: id });
+      }, 20000);
+      invites.set(id, { from: ws, to: target, timeout });
+      send(target, { type: 'duelInvite', inviteId: id, fromName: ws.playerName || 'Player' });
+      send(ws, { type: 'duelInviteSent', toName: target.playerName });
+
+    } else if (data.type === 'duelInviteResponse') {
+      const id = String(data.inviteId || '');
+      const inv = invites.get(id);
+      if (!inv || inv.to !== ws) return;   // expired, already handled, or not meant for this socket
+      clearTimeout(inv.timeout);
+      invites.delete(id);
+      if (!data.accept) { send(inv.from, { type: 'duelInviteDeclined', name: ws.playerName || 'Player' }); return; }
+      if (inv.from.roomCode || ws.roomCode) {   // one of them got matched into something else in the meantime
+        send(inv.from, { type: 'duelInviteFailed', reason: 'That player is no longer available.' });
+        send(ws, { type: 'duelInviteFailed', reason: 'That invite is no longer available.' });
+        return;
+      }
+      clearInvitesFor(inv.from); clearInvitesFor(ws);   // accepting cancels any other pending invites either of them had out
+      const code = newCode();
+      rooms.set(code, { host: inv.from, guest: ws });
+      inv.from.roomCode = code; inv.from.role = 'host';
+      ws.roomCode = code; ws.role = 'guest';
+      send(inv.from, { type: 'ready', youAre: 'host', code, oppName: ws.playerName });
+      send(ws, { type: 'ready', youAre: 'guest', code, oppName: inv.from.playerName });
+      broadcastOnline();
+
+    } else if (data.type === 'create') {
       const code = newCode();
       rooms.set(code, { host: ws, guest: null });
       ws.roomCode = code;
@@ -235,11 +315,14 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    clearInvitesFor(ws);
     const room = rooms.get(ws.roomCode);
-    if (!room) return;
-    const peer = ws.role === 'host' ? room.guest : room.host;
-    send(peer, { type: 'peerLeft' });
-    rooms.delete(ws.roomCode);
+    if (room) {
+      const peer = ws.role === 'host' ? room.guest : room.host;
+      send(peer, { type: 'peerLeft' });
+      rooms.delete(ws.roomCode);
+    }
+    if (ws.playerName) broadcastOnline();
   });
 });
 
