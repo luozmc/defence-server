@@ -53,9 +53,9 @@ function clearInvitesFor(ws) {
   }
 }
 function broadcastOnline() {
-  const names = [];
-  for (const c of wss.clients) if (c.playerName) names.push(c.playerName);
-  const payload = JSON.stringify({ type: 'online', count: names.length, players: names });
+  const players = [];
+  for (const c of wss.clients) if (c.playerName) players.push({ name: c.playerName, rank: c.playerRank || 0 });
+  const payload = JSON.stringify({ type: 'online', count: players.length, players });
   for (const c of wss.clients) if (c.readyState === c.OPEN) c.send(payload);
 }
 
@@ -207,6 +207,7 @@ wss.on('connection', (ws) => {
   ws.roomCode = null;
   ws.role = null;
   ws.playerName = null;
+  ws.playerRank = 0;
 
   ws.on('message', (raw) => {
     let data;
@@ -215,14 +216,16 @@ wss.on('connection', (ws) => {
     if (data.type === 'identify') {
       // lets this connection show up in the "who's online" list and be
       // found by name for duel invites. Re-sendable any time the name
-      // might have changed (e.g. right after signing in).
+      // or rank might have changed (e.g. right after signing in, or
+      // right after a promotion from winning a Duels match).
       ws.playerName = String(data.name || 'Guest').slice(0, 24) || 'Guest';
+      ws.playerRank = Math.max(0, Math.min(9, parseInt(data.rank, 10) || 0));
       broadcastOnline();
 
     } else if (data.type === 'listPlayers') {
-      const names = [];
-      for (const c of wss.clients) if (c.playerName) names.push(c.playerName);
-      send(ws, { type: 'online', count: names.length, players: names });
+      const players = [];
+      for (const c of wss.clients) if (c.playerName) players.push({ name: c.playerName, rank: c.playerRank || 0 });
+      send(ws, { type: 'online', count: players.length, players });
 
     } else if (data.type === 'duelInvite') {
       const toName = String(data.toName || '').slice(0, 24);
